@@ -1,0 +1,68 @@
+# pinger.yml: keep the Render Free instance awake by requesting /livez every 10 minutes DURING A DAILY WINDOW.
+#
+# Why a window and not 24/7 (found 2026-10-14): the workspace "Not Humans World" already runs two other Free web
+# services (Student-Management-System, trelix-github-app, both Oregon). Render grants 750 Free instance hours per
+# workspace per month, shared by every Free web service in it, and suspends ALL of them until the next month when the
+# pool is exhausted; spun-down services consume nothing. A 24/7 pinger alone is 744 hours, so it would take the other
+# two services down with it. The schedule below keeps slashdocs awake 02:00 to 18:59 UTC (07:30 to 00:29 IST), about
+# 17 hours a day = roughly 527 hours a month, leaving about 220 hours for the other two services' wake-ups. Outside
+# the window slashdocs sleeps and the first request pays the ~1 minute cold start (the CLI's 30 s timeout then needs a
+# retry). Narrow the hour range if the dashboard (Workspace settings, Billing, Free instance hours) shows the pool
+# running low; widen it to "*/10 * * * *" only if the other Free services are deleted.
+#
+# Install: copy this file to .github/workflows/slashdocs-pinger.yml in a PUBLIC GitHub repository the owner controls
+# (an otherwise empty one is fine), then set the repository variable SLASHDOCS_APP_HOST to <service>.onrender.com
+# (Settings, Secrets and variables, Actions, Variables). No secrets are involved: /livez is public and the workflow
+# holds nothing but a curl. The repository must be public because private-repository Actions minutes are billed
+# per job rounded up to one minute: 144 runs a day is about 4,300 to 4,460 minutes a month against the 2,000
+# included on the Free plan, so in a private repository the schedule stops around day 14 and Render sleeps again.
+# Public repositories have unlimited standard-runner minutes. If the repository must stay private, use the
+# cron-job.org alternative below instead.
+#
+# What it does and does not do:
+#   - Render Free spins a service down after 15 idle minutes; a request every 10 minutes keeps it up and burns the
+#     workspace's shared instance hours for as long as it runs (see the window arithmetic above).
+#   - It does NOT wake Neon: /livez touches neither Postgres nor the bucket (api/internal/server/handlers_health.go),
+#     so the database still suspends after 5 idle minutes and the 100 CU-hour allowance is untouched. The first
+#     real query after a Neon suspend pays the compute wake (sub-second to a few seconds), not a Render cold start.
+#   - It hits the Render-issued hostname directly (there is no CDN or access proxy in the free-only shape); curl -f
+#     turns anything but 2xx into a failed run, which GitHub reports by email.
+#   - GitHub schedules are best effort (runs can be late by several minutes under load) and GitHub disables scheduled
+#     workflows in repositories with no activity for 60 days: push a commit now and then, or use the alternative below.
+#   - No actions are checked out or executed: the job is a single curl on the hosted runner, so there is nothing to pin.
+#
+# Alternative without GitHub: cron-job.org (free). Create a job with URL https://<service>.onrender.com/livez, schedule
+# "every 10 minutes" restricted to the same hours (cron-job.org lets you pick hours and a timezone), request method GET,
+# timeout 30 s, "save responses" off, notifications on failure to your email. Expected response code 200. Same effect,
+# same caveats about Render hours; it also wakes nothing in Neon.
+#
+# To let the service sleep again (for example to run the spin-down timing in DAY-ONE-TESTS.sh), disable the workflow
+# (Actions, select it, "Disable workflow") or pause the cron-job.org job.
+
+name: slashdocs keep-awake pinger
+
+on:
+  schedule:
+    - cron: "*/10 2-18 * * *"   # every 10 minutes from 02:00 to 18:59 UTC (07:30 to 00:29 IST); see the window arithmetic above
+  workflow_dispatch: {}      # manual run to verify the variable is set
+
+permissions: {}              # the job needs no repository access at all
+
+concurrency:
+  group: slashdocs-pinger
+  cancel-in-progress: true   # a late run must not pile up behind the next one
+
+jobs:
+  livez:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      APP_HOST: ${{ vars.SLASHDOCS_APP_HOST }}   # <service>.onrender.com, set as a repository variable
+    steps:
+      - name: Ping /livez
+        run: |
+          if [ -z "${APP_HOST}" ]; then
+            echo "repository variable SLASHDOCS_APP_HOST is not set (expected <service>.onrender.com)" >&2
+            exit 1
+          fi
+          curl -fsS --max-time 60 -o /dev/null -w 'livez %{http_code} in %{time_total}s\n' "https://${APP_HOST}/livez"
