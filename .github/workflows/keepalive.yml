@@ -1,0 +1,38 @@
+# keepalive.yml: GitHub disables scheduled workflows in repositories with no activity for 60 days. This job makes one
+# small commit a month (appends a UTC date line to KEEPALIVE) so the pinger schedule stays enabled without anyone
+# remembering to push. It uses only the runner's built-in gh CLI with the job's own GITHUB_TOKEN; no third-party
+# actions are checked out, so there is nothing to pin.
+name: keepalive commit
+
+on:
+  schedule:
+    - cron: "17 3 1 * *"     # 03:17 UTC on the 1st of every month
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  touch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Append today's date to KEEPALIVE through the contents API
+        run: |
+          set -euo pipefail
+          path=KEEPALIVE
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}" --jq .sha 2>/dev/null || true)
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}" --jq .content 2>/dev/null | base64 -d || true)
+          new=$(printf '%s%s\n' "${existing}" "$(date -u +%Y-%m-%d) keepalive")
+          content=$(printf '%s' "${new}" | base64 -w0)
+          if [ -n "${sha}" ]; then
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${path}" -f message="chore: keepalive $(date -u +%Y-%m-%d)" -f content="${content}" -f sha="${sha}" --jq '.commit.sha'
+          else
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${path}" -f message="chore: keepalive $(date -u +%Y-%m-%d)" -f content="${content}" --jq '.commit.sha'
+          fi
